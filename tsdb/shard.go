@@ -595,8 +595,6 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		}
 	}
 
-	// Create a MeasurementFields cache.
-	mfCache := make(map[string]*MeasurementFields, 16)
 	j = 0
 	for i, p := range points {
 		// Skip any points with only invalid fields.
@@ -624,16 +622,13 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 			continue
 		}
 
-		// Grab the MeasurementFields checking the local cache to avoid lock contention.
+		// Grab the MeasurementFields using the latest field to avoid lock contention.
 		name := p.Name()
-		mf := mfCache[string(name)]
-		if mf == nil {
-			mf = engine.MeasurementFields(name).Clone()
-			mfCache[string(name)] = mf
-		}
+		mf := engine.MeasurementFields(name)
+		lastID := mf.LastFieldID()
 
 		// Check with the field validator.
-		if err := s.options.FieldValidator.Validate(mf, p); err != nil {
+		if err := s.options.FieldValidator.Validate(mf, lastID, p); err != nil {
 			switch err := err.(type) {
 			case PartialWriteError:
 				if reason == "" {
@@ -660,7 +655,7 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 				continue
 			}
 
-			if mf.FieldBytes(fieldKey) != nil {
+			if mf.FieldBytes(fieldKey, lastID) != nil {
 				continue
 			}
 
@@ -1529,13 +1524,17 @@ func (m *MeasurementFields) CreateFieldIfNotExists(name []byte, typ influxql.Dat
 
 	// Create and append a new field.
 	f := &Field{
-		ID:   uint8(len(m.fields) + 1),
+		ID:   m.lastID() + 1,
 		Name: string(name),
 		Type: typ,
 	}
 	m.fields[string(name)] = f
 
 	return nil
+}
+
+func (m *MeasurementFields) lastID() uint8 {
+	return uint8(len(m.fields))
 }
 
 func (m *MeasurementFields) FieldN() int {
@@ -1564,13 +1563,15 @@ func (m *MeasurementFields) HasField(name string) bool {
 }
 
 // FieldBytes returns the field for name, or nil if there is no field for name.
+// If the field was created after the given last field ID, it will return nil.
 // FieldBytes should be preferred to Field when the caller has a []byte, because
 // it avoids a string allocation, which can't be avoided if the caller converts
 // the []byte to a string and calls Field.
-func (m *MeasurementFields) FieldBytes(name []byte) *Field {
-	m.mu.RLock()
+func (m *MeasurementFields) FieldBytes(name []byte, lastID uint8) *Field {
 	f := m.fields[string(name)]
-	m.mu.RUnlock()
+	if (f != nil) && (f.ID > lastID) {
+		return nil
+	}
 	return f
 }
 
@@ -1596,17 +1597,12 @@ func (m *MeasurementFields) ForEachField(fn func(name string, typ influxql.DataT
 	}
 }
 
-// Clone returns copy of the MeasurementFields
-func (m *MeasurementFields) Clone() *MeasurementFields {
+// LastFieldID returns the ID of the last field created for this measurement.
+// Used when wanting an immutable view of the measurement fields.
+func (m *MeasurementFields) LastFieldID() uint8 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	fields := make(map[string]*Field, len(m.fields))
-	for key, field := range m.fields {
-		fields[key] = field
-	}
-	return &MeasurementFields{
-		fields: fields,
-	}
+	return m.lastID()
 }
 
 // MeasurementFieldSet represents a collection of fields by measurement.

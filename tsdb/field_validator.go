@@ -10,14 +10,14 @@ import (
 
 // FieldValidator should return a PartialWriteError if the point should not be written.
 type FieldValidator interface {
-	Validate(mf *MeasurementFields, point models.Point) error
+	Validate(mf *MeasurementFields, lastID uint8, point models.Point) error
 }
 
 // defaultFieldValidator ensures that points do not use different types for fields that already exist.
 type defaultFieldValidator struct{}
 
-// Validate will return a PartialWriteError if the point has inconsistent fields.
-func (defaultFieldValidator) Validate(mf *MeasurementFields, point models.Point) error {
+// Validate will return a PartialWriteError if the point has inconsistent fields, comparing fields up to the last field ID given.
+func (defaultFieldValidator) Validate(mf *MeasurementFields, lastID uint8, point models.Point) error {
 	iter := point.FieldIterator()
 	for iter.Next() {
 		// Skip fields name "time", they are illegal.
@@ -26,7 +26,8 @@ func (defaultFieldValidator) Validate(mf *MeasurementFields, point models.Point)
 		}
 
 		// If the fields is not present, there cannot be a conflict.
-		f := mf.FieldBytes(iter.FieldKey())
+		f := mf.FieldBytes(iter.FieldKey(), lastID)
+		// Ignore fields created concurrent to us.
 		if f == nil {
 			continue
 		}
